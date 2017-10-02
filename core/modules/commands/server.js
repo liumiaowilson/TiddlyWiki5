@@ -17,13 +17,49 @@ if($tw.node) {
 		fs = require("fs"),
 		url = require("url"),
 		path = require("path"),
-		http = require("http");
+		http = require("http"),
+        querystring = require('querystring');
 }
 
 exports.info = {
 	name: "server",
 	synchronous: true
 };
+
+function processPost(request, response, callback) {
+    var queryData = "";
+    if(typeof callback !== 'function') return null;
+
+    if(request.method == 'POST') {
+        request.on('data', function(data) {
+            queryData += data;
+            if(queryData.length > 1e6) {
+                queryData = "";
+                response.writeHead(413, {'Content-Type': 'text/plain'}).end();
+                request.connection.destroy();
+            }
+        });
+
+        request.on('end', function() {
+            var data = querystring.parse(queryData);
+            callback(data);
+        });
+
+    } else {
+        response.writeHead(405, {'Content-Type': 'text/plain'});
+        response.end();
+    }
+}
+
+var token;
+
+function getParams(req){
+  var q = req.url.split('?'), result = {};
+  if(q.length >= 2) {
+      return querystring.parse(q[1]);
+  }
+  return result;
+}
 
 /*
 A simple HTTP server with regexp-based routes
@@ -126,6 +162,7 @@ SimpleServer.prototype.requestHandler = function(request,response) {
 	// Dispatch the appropriate method
 	switch(request.method) {
 		case "GET": // Intentional fall-through
+        case "POST": // Intentional fall-through
 		case "DELETE":
 			route.handler(request,response,state);
 			break;
@@ -202,6 +239,145 @@ var Command = function(params,commander,callback) {
 			response.end(text,"utf8");
 		}
 	});
+    this.server.addRoute({
+        method: "POST",
+        path: /^\/api\/login$/,
+        handler: function(request,response,state) {
+            processPost(request, response, function(data) {
+                var username = data.username;
+                var password = data.password;
+                var json = {};
+                if(username === state.server.get("username") && password === state.server.get("password")) {
+                    token = "" + Date.now();
+                    json = {
+                        status: "OK",
+                        message: "Login Succeeded",
+                        token: token,
+                    };
+                }
+                else {
+                    json = {
+                        status: "ERROR",
+                        message: "Login Failed",
+                    };
+                }
+
+                response.writeHead(200, {"Content-Type": "application/json"});
+                response.end(JSON.stringify(json),"utf8");
+            });
+        }
+    });
+    this.server.addRoute({
+        method: "GET",
+        path: /^\/api\/get\/(.+)$/,
+        handler: function(request, response, state) {
+            var title = decodeURIComponent(state.params[0]);
+            var json = {};
+            var params = getParams(request) || {};
+            var t = params.token;
+            if(token === t) {
+                if(title) {
+                    var tiddler = state.wiki.getTiddler(title);
+                    if(tiddler) {
+                        $tw.utils.each(tiddler.fields,function(field,name) {
+                            json[name] = tiddler.getFieldString(name);
+                        });
+                        json.revision = state.wiki.getChangeCount(title);
+                        json.type = json.type || "text/vnd.tiddlywiki";
+                    }
+                }
+            }
+
+            response.writeHead(200, {"Content-Type": "application/json"});
+            response.end(JSON.stringify(json),"utf8");
+        }
+    });
+    this.server.addRoute({
+        method: "GET",
+        path: /^\/api\/query\/(.+)$/,
+        handler: function(request, response, state) {
+            var query = decodeURIComponent(state.params[0]);
+            var json = {};
+            var params = getParams(request) || {};
+            var t = params.token;
+            if(token === t) {
+                if(query) {
+                    var titles = state.wiki.filterTiddlers(query);
+                    json = titles;
+                }
+            }
+
+            response.writeHead(200, {"Content-Type": "application/json"});
+            response.end(JSON.stringify(json),"utf8");
+        }
+    });
+    this.server.addRoute({
+        method: "POST",
+        path: /^\/api\/save\/(.+)$/,
+        handler: function(request,response,state) {
+            processPost(request, response, function(data) {
+                var json = {};
+                var params = getParams(request) || {};
+                var t = params.token;
+                if(token === t) {
+                    var title = decodeURIComponent(state.params[0]);
+                    var tiddler = state.wiki.getTiddler(title);
+
+                    if(tiddler) {
+                        state.wiki.addTiddler(new $tw.Tiddler(state.wiki.getCreationFields(),
+                            tiddler,
+                            data,
+                            state.wiki.getModificationFields()));
+                    }
+                    else {
+                        state.wiki.addTiddler(new $tw.Tiddler(state.wiki.getCreationFields(),
+                            data,
+                            state.wiki.getModificationFields()));
+                    }
+
+                    json = {
+                        status: "OK",
+                        message: "Save Success",
+                    };
+                }
+                else {
+                    json = {
+                        status: "ERROR",
+                        message: "Invalid token",
+                    };
+                }
+
+                response.writeHead(200, {"Content-Type": "application/json"});
+                response.end(JSON.stringify(json),"utf8");
+            });
+        }
+    });
+    this.server.addRoute({
+        method: "GET",
+        path: /^\/api\/delete\/(.+)$/,
+        handler: function(request, response, state) {
+            var title = decodeURIComponent(state.params[0]);
+            var json = {};
+            var params = getParams(request) || {};
+            var t = params.token;
+            if(token === t) {
+                if(title) {
+                    var tiddler = state.wiki.getTiddler(title);
+                    if(tiddler) {
+                        state.wiki.deleteTiddler(title);
+
+                        json = {
+                            status: "OK",
+                            message: "Delete Success",
+                        };
+                    }
+                }
+            }
+
+            response.writeHead(200, {"Content-Type": "application/json"});
+            response.end(JSON.stringify(json),"utf8");
+        }
+    });
 	this.server.addRoute({
 		method: "GET",
 		path: /^\/status$/,
